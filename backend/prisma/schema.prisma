@@ -1,0 +1,520 @@
+// EduPay SaaS Ecosystem - Multi-Tenant Database Schema
+// Shared PostgreSQL database; tenant identity is part of every relationship.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPERADMIN
+  ADMIN_TU
+  KASIR
+  PARENT
+  STUDENT
+}
+
+enum EducationLevel {
+  SD   // Grade 1 - 6
+  SMP  // Grade 7 - 9
+  SMA  // Grade 10 - 12
+  SMK  // Grade 10 - 12
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentChannel {
+  QRIS
+  BCA_VA
+  MANDIRI_VA
+  BNI_VA
+  BRI_VA
+  CASH
+  MANUAL_TRANSFER
+}
+
+enum ShuttleType {
+  NONE
+  ONE_WAY
+  TWO_WAY
+}
+
+// ==========================================
+// 1. TENANT MANAGEMENT
+// ==========================================
+model School {
+  id                   String                 @id @default(uuid())
+  npsn                 String                 @unique
+  name                 String
+  slug                 String                 @unique
+  phone                String?
+  address              String?
+  logo_url             String?
+  stamp_url            String?
+  signature_url        String?
+  identity_assets      SchoolAsset[]
+  level                EducationLevel         @default(SD)
+  
+  // Multi-tenant Midtrans Credentials per School
+  midtrans_server_key  String
+  midtrans_client_key  String
+  midtrans_is_prod     Boolean                @default(false)
+  
+  // Billing cycle configuration
+  invoice_cutoff_day   Int                    @default(1)  // Generated every 1st of month
+  due_day_of_month     Int                    @default(10) // Due by 10th
+  
+  created_at           DateTime               @default(now())
+  updated_at           DateTime               @updatedAt
+
+  users                User[]
+  grade_fees           GradeFeeSetting[]
+  extracurriculars     Extracurricular[]
+  shuttle_routes       ShuttleRoute[]
+  students             Student[]
+  invoices             Invoice[]
+  payment_transactions PaymentTransaction[]
+  profile              SchoolProfile?
+
+  @@map("schools")
+}
+
+// ==========================================
+// 2. USER & AUTHENTICATION
+// ==========================================
+model User {
+  id            String    @id @default(uuid())
+  school_id     String
+  email         String
+  firebase_uid  String    @unique
+  is_active     Boolean   @default(true)
+  password_hash String?
+  role          UserRole  @default(PARENT)
+  full_name     String
+  phone_number  String?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  school        School    @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  children      Student[] @relation("ParentChildren")
+  cashier_txs   PaymentTransaction[] @relation("CashierTransactions")
+
+  @@unique([school_id, email])
+  @@index([school_id, role])
+  @@unique([school_id, id])
+  @@map("users")
+}
+
+// ==========================================
+// 3. GRADE 1 TO 12 PRICING MATRIX
+// ==========================================
+model GradeFeeSetting {
+  id                     String   @id @default(uuid())
+  school_id              String
+  grade                  Int      // 1 to 12
+  spp_amount             Decimal  @db.Decimal(12, 2)
+  registration_fee       Decimal  @default(0) @db.Decimal(12, 2) // Uang Pangkal / Daftar Ulang
+  
+  // Discounts
+  early_bird_discount    Decimal  @default(25000) @db.Decimal(12, 2) // Potongan jika bayar <= tgl 5
+  early_bird_cutoff_day  Int      @default(5)
+  sibling_discount_pct   Decimal  @default(10.0) @db.Decimal(5, 2)  // Potongan jika punya > 1 anak aktif (10%)
+
+  created_at             DateTime @default(now())
+  updated_at             DateTime @updatedAt
+
+  school                 School   @relation(fields: [school_id], references: [id], onDelete: Restrict)
+
+  @@unique([school_id, grade])
+  @@index([school_id])
+  @@unique([school_id, id])
+  @@map("grade_fee_settings")
+}
+
+// ==========================================
+// 4. EKSTRAKURIKULER
+// ==========================================
+model Extracurricular {
+  id          String   @id @default(uuid())
+  school_id   String
+  code        String
+  name        String   // e.g. Robotik, Futsal, Tahfidz, Coding
+  monthly_fee Decimal  @db.Decimal(12, 2)
+  mentor_name String?
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+
+  school      School   @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  enrollments StudentExtracurricular[]
+
+  @@unique([school_id, code])
+  @@index([school_id])
+  @@unique([school_id, id])
+  @@map("extracurriculars")
+}
+
+// ==========================================
+// 5. ANTAR-JEMPUT SEKOLAH (SHUTTLE & ZONES)
+// ==========================================
+model ShuttleRoute {
+  id                   String      @id @default(uuid())
+  school_id            String
+  zone_name            String      // e.g. "Zona 1 - Sukajadi & Pasteur"
+  route_description    String
+  vehicle_no           String      // e.g. "B 1234 EDU"
+  driver_name          String
+  driver_phone         String
+  monthly_fee_two_way  Decimal     @db.Decimal(12, 2)
+  monthly_fee_one_way  Decimal     @db.Decimal(12, 2)
+  status               String      @default("ACTIVE") // ACTIVE, MAINTENANCE
+  created_at           DateTime    @default(now())
+
+  school               School      @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  students             Student[]
+
+  @@index([school_id])
+  @@unique([school_id, id])
+  @@map("shuttle_routes")
+}
+
+// ==========================================
+// 6. STUDENTS & ENROLLMENTS
+// ==========================================
+model Student {
+  id               String                 @id @default(uuid())
+  school_id        String
+  parent_id        String
+  nis              String
+  nisn             String?
+  full_name        String
+  grade            Int                    // 1 to 12
+  classroom        String                 // e.g. "1-A", "7-B", "12-IPA-1"
+  shuttle_route_id String?
+  shuttle_type     ShuttleType            @default(NONE)
+  is_active        Boolean                @default(true)
+  created_at       DateTime               @default(now())
+  updated_at       DateTime               @updatedAt
+
+  school           School                 @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  parent           User                   @relation("ParentChildren", fields: [school_id, parent_id], references: [school_id, id], onDelete: Restrict)
+  shuttle_route    ShuttleRoute?          @relation(fields: [school_id, shuttle_route_id], references: [school_id, id])
+  extracurriculars StudentExtracurricular[]
+  invoices         Invoice[]
+
+  @@unique([school_id, nis])
+  @@index([school_id, parent_id])
+  @@index([school_id, grade])
+  @@unique([school_id, id])
+  @@map("students")
+}
+
+model StudentExtracurricular {
+  id                 String          @id @default(uuid())
+  school_id          String
+  student_id         String
+  extracurricular_id String
+  enrolled_at        DateTime        @default(now())
+
+  student            Student         @relation(fields: [school_id, student_id], references: [school_id, id], onDelete: Restrict)
+  extracurricular    Extracurricular @relation(fields: [school_id, extracurricular_id], references: [school_id, id], onDelete: Restrict)
+
+  @@unique([student_id, extracurricular_id])
+  @@index([school_id])
+  @@unique([school_id, id])
+  @@map("student_extracurriculars")
+}
+
+// ==========================================
+// 7. INVOICE & AUTOMATIC BILLING
+// ==========================================
+model Invoice {
+  id                     String          @id @default(uuid())
+  school_id              String
+  student_id             String
+  invoice_no             String          // e.g. "INV/2026/10/ALF-0012"
+  month_period           Int             // 1 to 12
+  year_period            Int             // 2026
+  issue_date             DateTime        @default(now())
+  due_date               DateTime
+  
+  // Breakdown components
+  spp_amount             Decimal         @db.Decimal(12, 2)
+  shuttle_amount         Decimal         @default(0) @db.Decimal(12, 2)
+  extracurricular_amount Decimal         @default(0) @db.Decimal(12, 2)
+  registration_amount    Decimal         @default(0) @db.Decimal(12, 2)
+  
+  // Applied Discounts
+  early_bird_discount    Decimal         @default(0) @db.Decimal(12, 2)
+  sibling_discount       Decimal         @default(0) @db.Decimal(12, 2)
+  
+  // Total calculated: (SPP + Shuttle + Ekskul + Reg) - (EarlyBird + Sibling)
+  total_amount           Decimal         @db.Decimal(12, 2)
+  
+  status                 InvoiceStatus   @default(PENDING)
+  payment_type           PaymentChannel?
+  
+  // Midtrans Snap Token & URL
+  early_bird_cutoff_day  Int             @default(5)
+  pricing_locked_at      DateTime?
+  snap_token             String?
+  snap_redirect_url      String?
+  paid_at                DateTime?
+
+  created_at             DateTime        @default(now())
+  updated_at             DateTime        @updatedAt
+
+  school                 School          @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  student                Student         @relation(fields: [school_id, student_id], references: [school_id, id], onDelete: Restrict)
+  items                  InvoiceItem[]
+  transactions           PaymentTransaction[]
+  attempts               PaymentAttempt[]
+  incomes                CashIncome[]
+
+  @@unique([school_id, invoice_no])
+  @@unique([school_id, student_id, month_period, year_period])
+  @@index([school_id, status])
+  @@index([school_id, student_id])
+  @@unique([school_id, id])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  school_id   String
+  id          String   @id @default(uuid())
+  invoice_id  String
+  title       String
+  category    String   // SPP, SHUTTLE, EXTRACURRICULAR, REGISTRATION, DISCOUNT
+  amount      Decimal  @db.Decimal(12, 2)
+
+  invoice     Invoice  @relation(fields: [school_id, invoice_id], references: [school_id, id], onDelete: Restrict)
+
+  @@index([invoice_id])
+  @@unique([school_id, id])
+  @@map("invoice_items")
+}
+
+// ==========================================
+// 8. PAYMENT TRANSACTIONS & CASHIER AUDIT
+// ==========================================
+model PaymentTransaction {
+  id                String         @id @default(uuid())
+  school_id         String
+  invoice_id        String
+  transaction_time  DateTime       @default(now())
+  payment_channel   PaymentChannel
+  amount            Decimal        @db.Decimal(12, 2)
+  
+  receipt_no        String
+  receipt_hash      String         @unique
+  cash_received     Decimal?       @db.Decimal(12, 2)
+  // Midtrans order mapping or Cashier reference
+  midtrans_order_id String?        @unique
+  midtrans_status   String?
+  
+  // Kasir TU recording
+  cashier_id        String?
+  transfer_reference String?
+  cashier_notes     String?
+  receipt_qr_code   String?        // Verification hash / URL
+  
+  school            School         @relation(fields: [school_id], references: [id], onDelete: Restrict)
+  invoice           Invoice        @relation(fields: [school_id, invoice_id], references: [school_id, id], onDelete: Restrict)
+  cashier           User?          @relation("CashierTransactions", fields: [school_id, cashier_id], references: [school_id, id])
+
+  @@index([school_id, transaction_time])
+  @@unique([school_id, invoice_id])
+  @@unique([school_id, receipt_no])
+  @@unique([school_id, transfer_reference], map: "payment_transactions_school_transfer_reference")
+  @@index([invoice_id])
+  @@unique([school_id, id])
+  @@map("payment_transactions")
+}
+
+// ==========================================
+// 9. DYNAMIC SCHOOL PROFILE & OFFICIAL LETTERHEAD (KOP SURAT)
+// ==========================================
+model SchoolProfile {
+  id                        String   @id @default(uuid())
+  school_id                 String   @unique
+  kop_surat_title           String   // e.g. "YAYASAN PENDIDIKAN AL-FALAH INDONESIA"
+  kop_surat_subtitle        String   // e.g. "SDIT AL-FALAH JAKARTA SELATAN (AKREDITASI A)"
+  kop_surat_address         String   // Complete official address with postal code & web
+  kop_surat_contact         String   // Telp / Fax / Email
+  logo_url                  String?
+  
+  // Digital Signatures & Officials
+  headmaster_name           String   // e.g. "Drs. H. M. Wildan, M.Pd."
+  headmaster_nip            String?  // NIP / NIK
+  headmaster_signature_url  String?
+  treasurer_name            String   // e.g. "Siti Rahmawati, S.E."
+  treasurer_nip             String?
+  treasurer_signature_url   String?
+  
+  // Official School Bank Account
+  bank_name                 String   // e.g. "Bank Syariah Indonesia (BSI)"
+  bank_account_number       String   // e.g. "7123-4567-89"
+  bank_account_holder       String   // e.g. "Yayasan Pendidikan Al-Falah"
+
+  updated_at                DateTime @updatedAt
+  school                    School   @relation(fields: [school_id], references: [id], onDelete: Restrict)
+
+  @@unique([school_id, id])
+  @@map("school_profiles")
+}
+
+// ==========================================
+// 10. BUKU KAS: PEMASUKAN & PENGELUARAN (GENERAL LEDGER)
+// ==========================================
+enum IncomeCategory {
+  SPP_INVOICE       // Otomatis dari pelunasan invoice siswa
+  DANA_BOS          // Bantuan Operasional Sekolah dari Kemendikbud
+  HIBAH_PEMDA       // Hibah yayasan / pemerintah daerah
+  DONASI_WAKAF      // Donasi sukarela / wakaf pembangunan
+  SERAGAM_BUKU      // Penjualan atribut seragam & buku panduan
+  LAIN_LAIN
+}
+
+model CashIncome {
+  id           String         @id @default(uuid())
+  school_id    String
+  date         DateTime       @default(now())
+  amount       Decimal        @db.Decimal(14, 2)
+  category     IncomeCategory @default(SPP_INVOICE)
+  description  String
+  invoice_id   String?        // Terkoneksi jika sumbernya pelunasan invoice
+  received_by  String         // Petugas penerima / kasir
+  receipt_no   String         // Nomor bukti kas masuk (BKM-2026-XXXX)
+
+  created_at   DateTime       @default(now())
+  updated_at   DateTime       @updatedAt
+
+  invoice      Invoice? @relation(fields: [school_id, invoice_id], references: [school_id, id], onDelete: Restrict)
+  @@unique([school_id, receipt_no])
+  @@unique([school_id, invoice_id])
+  @@index([school_id, date])
+  @@index([school_id, category])
+  @@unique([school_id, id])
+  @@map("cash_incomes")
+}
+
+model ExpenseCategory {
+  id         String        @id @default(uuid())
+  school_id  String
+  code       String        // e.g. "OPR-01", "GAJI-01"
+  name       String        // e.g. "Gaji Guru & Staf", "Perawatan Armada Jemputan"
+  is_active  Boolean       @default(true)
+  expenses   CashExpense[]
+
+  @@unique([school_id, code])
+  @@unique([school_id, id])
+  @@map("expense_categories")
+}
+
+model CashExpense {
+  id                 String          @id @default(uuid())
+  school_id          String
+  category_id        String
+  date               DateTime        @default(now())
+  amount             Decimal         @db.Decimal(14, 2)
+  description        String
+  voucher_no         String          // Nomor Bukti Kas Keluar (BKK-2026-XXXX)
+  receipt_photo_url  String?         // URL foto nota/struk pengeluaran fisik
+  paid_to            String          // Nama penerima pembayaran (e.g. "Bengkel Astra", "PLN")
+  approved_by        String          // Pejabat yang menyetujui (Kepala Sekolah / Bendahara)
+
+  created_at         DateTime        @default(now())
+  updated_at         DateTime        @updatedAt
+
+  category           ExpenseCategory @relation(fields: [school_id, category_id], references: [school_id, id])
+
+  @@index([school_id, date])
+  @@unique([school_id, voucher_no])
+  @@index([school_id, category_id])
+  @@unique([school_id, id])
+  @@map("cash_expenses")
+}
+
+
+enum AttemptStatus {
+  CREATING
+  READY
+  SETTLED
+  EXPIRED
+  CANCELLED
+  REVIEW
+}
+
+model PaymentAttempt {
+  id String @id @default(uuid())
+  school_id String
+  invoice_id String
+  order_id String @unique
+  amount Decimal @db.Decimal(12, 2)
+  status AttemptStatus @default(CREATING)
+  snap_token String?
+  redirect_url String?
+  expires_at DateTime
+  gateway_status String?
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  invoice Invoice @relation(fields: [school_id, invoice_id], references: [school_id, id], onDelete: Restrict)
+  @@unique([school_id, id])
+  @@index([school_id, invoice_id, status])
+  @@map("payment_attempts")
+}
+
+model ReceiptSequence {
+  id String @id @default(uuid())
+  school_id String
+  period String
+  value Int @default(0)
+  @@unique([school_id, period])
+  @@unique([school_id, id])
+  @@map("receipt_sequences")
+}
+
+model AuditEvent {
+  id String @id @default(uuid())
+  school_id String
+  actor_id String
+  action String
+  entity_id String
+  created_at DateTime @default(now())
+  @@unique([school_id, id])
+  @@index([school_id, created_at])
+  @@map("audit_events")
+}
+
+model SchoolAsset {
+ id String @id @default(uuid())
+ school_id String
+ kind String
+ content_type String
+ data Bytes
+ updated_at DateTime @updatedAt
+ school School @relation(fields:[school_id], references:[id], onDelete:Restrict)
+ @@unique([school_id,kind])
+ @@map("school_assets")
+}
+
+model OnboardingJob {
+ id String @id
+ slug String @unique
+ admin_email String @unique
+ fingerprint String
+ firebase_uid String @unique
+ school_id String @unique
+ status String @default("PENDING")
+ created_at DateTime @default(now())
+ updated_at DateTime @updatedAt
+ @@map("onboarding_jobs")
+}

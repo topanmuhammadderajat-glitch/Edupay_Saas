@@ -1,12 +1,8 @@
 # EduPay SaaS
 
-Public deployment source for the multi-school Express payment backend.
+Express payment backend for multiple schools, using Supabase PostgreSQL and Firebase Authentication.
 
-- Backend: Node.js / TypeScript / Prisma
-- Database: existing Supabase PostgreSQL
-- Authentication: Firebase Admin SDK
-- Hosting blueprint: Render Free (render.yaml)
-- Liveness endpoint: GET /api/health
-- Readiness endpoint: GET /health/ready
+Render blueprint: render.yaml (plan: free).
+Liveness: GET /api/health. Readiness: GET /health/ready.
 
-Runtime credentials are supplied as hosting secrets. Do not commit .env files, service-account keys, runtime data or test accounts.
+Supply runtime credentials through hosting secrets. Do not commit .env files, keys, seeds or runtime data.
