@@ -42,7 +42,7 @@ export function createApp() {
   return app;
 }
 const app = createApp();
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && process.env.EDUPAY_SERVERLESS !== '1') {
   if (!process.env.PUBLIC_API_URL) console.error('PUBLIC_API_URL belum diatur; pembayaran belum dapat dicatat.');
   const stopReconciliation = startReconciliationWorker(prisma);
   const port=Number(process.env.PORT??5000);

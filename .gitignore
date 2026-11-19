@@ -19,3 +19,5 @@ backend/assets/receipts/**/*.png
 !backend/.env.render.example
 
 .env.render.local
+
+.netlify/

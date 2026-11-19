@@ -1,0 +1,32 @@
+[build]
+base = "backend"
+command = "npm run build"
+publish = "netlify/public"
+functions = "netlify/functions"
+
+[build.environment]
+NODE_VERSION = "22"
+EDUPAY_SERVERLESS = "1"
+
+[functions]
+node_bundler = "esbuild"
+external_node_modules = ["@prisma/client", "serverless-http"]
+included_files = ["node_modules/.prisma/client/**"]
+
+[[redirects]]
+from = "/api/*"
+to = "/.netlify/functions/api/:splat"
+status = 200
+force = true
+
+[[redirects]]
+from = "/health/*"
+to = "/.netlify/functions/api/:splat"
+status = 200
+force = true
+
+[[redirects]]
+from = "/health"
+to = "/.netlify/functions/api"
+status = 200
+force = true
